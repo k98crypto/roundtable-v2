@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>圆桌 v2（本地版，不公开）</title><style>
+body{font-family:system-ui,sans-serif;margin:16px;line-height:1.6} .Muse{color:#2563eb}.Codex{color:#059669}.Antigravity{color:#7c3aed}.you{color:#111;font-weight:700}
+button{margin:4px;padding:6px 10px} .warn{color:#b45309} .gate{border:1px solid #ddd;padding:10px;margin:10px 0}
+</style></head><body>
+<h1>圆桌 v2（本地版）</h1>
+<p>事实源是文件夹 + meetings.json，本页只读总结 + 深链、不另建数据库。CLI 与桥不能同时写同一个 meetings.json。</p>
+<div id="version"></div>
+<div class="gate"><b>技能开关（手动先审查，人工拍板才生效）</b><br>
+<button onclick="alert('Impeccable：先审一页 WebUI，再按建议执行 / 按原意执行 / 取消，三选一，须写具体原因')">Impeccable 审查</button>
+<button onclick="alert('Ponytail：只审小 diff，严谨实测代码少约 54%、token 少约 22%，勿用 94% 口径')">Ponytail 审查</button>
+<button onclick="alert('security-audit：只在无网络沙箱、只审自有代码，先审小测试库')">security-audit 审查</button>
+<button onclick="alert('Graphify：只读索引，永不当真相，先做门槛测试')">Graphify 只读</button>
+</div>
+<div id="topics"></div>
+<div id="summary"></div>
+<script src="/app.js"></script>
+</body></html>
