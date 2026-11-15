@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 飞书入口：群消息 → Ticket → 现有 dsh Worker → Writer/processJobs → 群回复（总结 + 全文）。
+// 飞书入口：群消息 → Ticket → 对应 Worker → Writer/processJobs → 群回复（总结 + 全文）。
 // 铁律：meetings.json 只由 Writer 经 processJobs 写；飞书只作入口；密钥只留进程内存。
 // 仅使用 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_ALLOWED_CHAT_ID 环境变量，不读配置文件。
 import fs from 'node:fs';
@@ -15,6 +15,11 @@ const APP_SECRET = process.env.FEISHU_APP_SECRET || '';
 const ALLOWED_CHAT_ID = process.env.FEISHU_ALLOWED_CHAT_ID || '';
 const DATA_ROOT = 'D:\\圆桌会议';
 const DSH_OUT_DIR = path.join(DATA_ROOT, 'Agent输出', 'dsh');
+const CODEX_OUT_DIR = path.join(DATA_ROOT, 'Agent输出', 'Codex');
+const WORKER_MAP = Object.freeze({
+  dsh: { script: 'dsh-worker.mjs', outDir: DSH_OUT_DIR },
+  codex: { script: 'codex-worker.mjs', outDir: CODEX_OUT_DIR },
+});
 const TICKETS_DIR = path.join(DSH_OUT_DIR, 'tickets');
 const LOG_PATH = path.join(HERE, 'feishu-bot.log');
 const MAX_TEXT_BYTES = 26000;
@@ -120,9 +125,18 @@ function persistTicket(ticket, sourceMessageId) {
   return { path: file, duplicate: false };
 }
 
-function spawnNode(script, args) {
+function codexChildEnvironment() {
+  const env = { ...process.env };
+  // Keep Codex's configured provider/login environment; Feishu credentials never leave this process.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('FEISHU_')) delete env[key];
+  }
+  return env;
+}
+
+function spawnNode(script, args, sourceEnv = process.env) {
   return new Promise((resolve, reject) => {
-    const childEnv = { ...process.env };
+    const childEnv = { ...sourceEnv };
     // dsh-worker forwards its process environment to dsh headless; never let Feishu credentials escape this process.
     delete childEnv.FEISHU_APP_ID;
     delete childEnv.FEISHU_APP_SECRET;
@@ -158,9 +172,12 @@ function isInside(root, candidate) {
 
 async function processTicket(ticketPath, ticket, chatId) {
   try {
-    log(`Ticket ${ticket.id}: worker start; topic=${ticket.topicId}; seat=dsh`);
-    await spawnNode(path.join(HERE, 'dsh-worker.mjs'), [ticketPath]);
-    const receiptPath = path.join(DSH_OUT_DIR, ticket.topicId, '回执.json');
+    const worker = WORKER_MAP[ticket.seat];
+    if (!worker) throw new Error('Ticket 指向未配置的 Worker');
+    log(`Ticket ${ticket.id}: worker start; topic=${ticket.topicId}; seat=${ticket.seat}`);
+    const childEnv = ticket.seat === 'codex' ? codexChildEnvironment() : process.env;
+    await spawnNode(path.join(HERE, worker.script), [ticketPath], childEnv);
+    const receiptPath = path.join(worker.outDir, ticket.topicId, '回执.json');
     if (!fs.existsSync(receiptPath)) throw new Error('Worker 完成但未找到回执文件');
     const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
     if (receipt.ticketId !== ticket.id) throw new Error('回执 Ticket ID 与当前任务不一致');
@@ -169,7 +186,7 @@ async function processTicket(ticketPath, ticket, chatId) {
     await spawnNode(path.join(HERE, 'writer.mjs'), [receiptPath]);
 
     let fullText = '';
-    if (receipt.status === 'done' && receipt.outputFile && isInside(DSH_OUT_DIR, receipt.outputFile)) {
+    if (receipt.status === 'done' && receipt.outputFile && isInside(worker.outDir, receipt.outputFile)) {
       fullText = fs.readFileSync(receipt.outputFile, 'utf8');
     }
     await sendText(chatId, formatReply(receipt, fullText));
@@ -266,9 +283,9 @@ function handleMessage(data) {
     void sendText(chatId, '飞书消息未生成 Ticket：第一行必须以议题 id 开头。').catch((error) => log(`拒绝消息的提示发送失败：${redactLog(error?.message)}`));
     return;
   }
-  if (ticket.seat !== 'dsh') {
-    void sendText(chatId, `【${ticket.topicId}】Ticket 已解析，但当前已有的可执行 Worker 只有 dsh；未改派至其他席位。请明确使用“派给:dsh”，或先接好该席位已有的 Router/Worker 路径。`).catch((error) => log(`席位提示发送失败：${redactLog(error?.message)}`));
-    log(`Ticket not dispatched; unsupported seat=${ticket.seat}; topic=${ticket.topicId}`);
+  if (!WORKER_MAP[ticket.seat]) {
+    void sendText(chatId, `【${ticket.topicId}】当前支持的可执行 Worker 为 dsh、codex；未改派。请在消息中明确写“派给:dsh”或“派给:codex”。`).catch((error) => log(`席位提示发送失败：${redactLog(error?.message)}`));
+    log(`Ticket not dispatched; unsupported seat; topic=${ticket.topicId}`);
     return;
   }
   let meeting = null;
@@ -293,7 +310,7 @@ function handleMessage(data) {
     enqueueTicket(persisted.path, ticket, chatId);
   } catch (error) {
     log(`Ticket persistence failed; ${redactLog(error?.message)}`);
-    void sendText(chatId, `【${ticket.topicId}】Ticket 未能写入现有 dsh tickets 队列；未启动 Worker。请查看 superagent\\feishu-bot.log。`).catch((sendError) => log(`Ticket failure notice send failed; ${redactLog(sendError?.message)}`));
+    void sendText(chatId, `【${ticket.topicId}】Ticket 未能写入现有 tickets 队列；未启动 Worker。请查看 superagent\\feishu-bot.log。`).catch((sendError) => log(`Ticket failure notice send failed; ${redactLog(sendError?.message)}`));
   }
 }
 
@@ -339,8 +356,13 @@ async function startTransport() {
 
 if (process.argv.includes('--self-test')) {
   const t = parseTicket('20261101-01 上线报数：回一句确认\n派给:dsh\n优先级:normal');
+  const codexTicket = parseTicket('20261101-01 Codex接线测试\n派给:codex');
+  if (codexTicket.error || codexTicket.seat !== 'codex') {
+    console.error('Codex派发自检失败');
+    process.exitCode = 1;
+  }
   const r = formatReply({ topicId: '20261101-01', conclusion: '已接入。sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' }, '正文含 sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX 和铁律原文');
-  console.log(JSON.stringify({ ticket: t, reply: r }, null, 2));
+  console.log(JSON.stringify({ ticket: t, codexTicket, reply: r }, null, 2));
   console.log('自检：回复中不应出现真实密钥（sk- 已被 [已隐藏密钥] 替换）。');
   const ctx = buildTopicContext({ topic: '确认圆桌会议上线', messages: [{ speaker: '你', text: '飞书接线测试' }] });
   console.log('议题上下文自检：' + JSON.stringify(ctx));
