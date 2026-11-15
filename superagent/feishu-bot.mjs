@@ -46,6 +46,20 @@ export function parseTicket(text, from = 'feishu-group') {
   };
 }
 
+// 议题上下文：标题 + 最近 3 条讨论（各截 120 字）。
+// dsh 建议（2026-11-15）：群里短句任务描述只有几个字，Worker 得自己翻仓库找上下文；入队前附上，Worker 不用再翻。
+export function buildTopicContext(meeting) {
+  if (!meeting) return '';
+  const parts = [];
+  if (meeting.topic) parts.push(`议题：${String(meeting.topic).replace(/\s+/g, ' ').slice(0, 120)}`);
+  const messages = Array.isArray(meeting.messages) ? meeting.messages.slice(-3) : [];
+  for (const msg of messages) {
+    const text = String(msg?.text || '').replace(/\s+/g, ' ').slice(0, 120);
+    if (text) parts.push(`${msg?.speaker || '发言'}：${text}`);
+  }
+  return parts.length ? `【议题上下文】\n${parts.join('\n')}` : '';
+}
+
 function scrubSecrets(input) {
   let value = String(input || '')
     .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKLT[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})\b/gi, '[已隐藏密钥]')
@@ -257,13 +271,17 @@ function handleMessage(data) {
     log(`Ticket not dispatched; unsupported seat=${ticket.seat}; topic=${ticket.topicId}`);
     return;
   }
+  let meeting = null;
   try {
-    getMeeting(DATA_ROOT, ticket.topicId);
+    ({ m: meeting } = getMeeting(DATA_ROOT, ticket.topicId));
   } catch {
     void sendText(chatId, `【${ticket.topicId}】议题不存在；Ticket 未入队，也未启动 Worker。`).catch((error) => log(`议题校验提示发送失败：${redactLog(error?.message)}`));
     log(`Ticket rejected; topic does not exist: ${ticket.topicId}`);
     return;
   }
+  // 入队前把议题上下文附在任务描述前，短句任务也不用 Worker 自己翻仓库。
+  const topicContext = buildTopicContext(meeting);
+  if (topicContext) ticket.description = `${topicContext}\n\n${ticket.description}`;
 
   try {
     const persisted = persistTicket(ticket, messageId);
@@ -324,6 +342,8 @@ if (process.argv.includes('--self-test')) {
   const r = formatReply({ topicId: '20261101-01', conclusion: '已接入。sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' }, '正文含 sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX 和铁律原文');
   console.log(JSON.stringify({ ticket: t, reply: r }, null, 2));
   console.log('自检：回复中不应出现真实密钥（sk- 已被 [已隐藏密钥] 替换）。');
+  const ctx = buildTopicContext({ topic: '确认圆桌会议上线', messages: [{ speaker: '你', text: '飞书接线测试' }] });
+  console.log('议题上下文自检：' + JSON.stringify(ctx));
 } else if (process.argv.includes('--run')) {
   startTransport().catch((error) => {
     log(`Transport startup failed; ${redactLog(error?.message || 'unknown error')}`);
